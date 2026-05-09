@@ -6,10 +6,12 @@ import { config } from './config';
 
 // 路由
 import authRoutes from './routes/auth.routes';
+import authPhoneRoutes from './routes/auth-phone.routes';
 import userRoutes from './routes/user.routes';
 import matchRoutes from './routes/match.routes';
 import chatRoutes from './routes/chat.routes';
 import communityRoutes from './routes/community.routes';
+import aiRoutes from './routes/ai.routes';
 
 const app = express();
 
@@ -27,11 +29,13 @@ app.get('/health', (_req, res) => {
 
 // API路由
 app.use('/api/auth', authRoutes);
+app.use('/api/auth/phone', authPhoneRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/swipe', matchRoutes);
 app.use('/api/matches', matchRoutes);
 app.use('/api/conversations', chatRoutes);
 app.use('/api/communities', communityRoutes);
+app.use('/api/ai', aiRoutes);
 
 // 404
 app.use((_req, res) => {
@@ -48,7 +52,7 @@ app.listen(config.port, () => {
   console.log(`
 ╔═══════════════════════════════════════════════════╗
 ║                                                   ║
-║   🚀 缘遇 API Server 启动成功                    ║
+║   🚀 臻我 API Server 启动成功                   ║
 ║                                                   ║
 ║   环境:    ${config.nodeEnv.padEnd(38)}║
 ║   端口:    ${String(config.port).padEnd(38)}║

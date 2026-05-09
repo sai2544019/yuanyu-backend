@@ -13,7 +13,7 @@ router.post('/', async (req: AuthRequest, res: Response) => {
     if (!target_id || !action) {
       return res.status(400).json({ code: 400, message: '参数不完整' });
     }
-    const result = matchService.swipe(req.userId!, target_id, action);
+    const result = await matchService.swipe(req.userId!, target_id, action);
     res.json({ code: 0, message: '操作成功', data: result });
   } catch (err: unknown) {
     res.status(400).json({ code: 400, message: err instanceof Error ? err.message : '操作失败' });
@@ -21,15 +21,15 @@ router.post('/', async (req: AuthRequest, res: Response) => {
 });
 
 // GET /api/matches
-router.get('/', (req: AuthRequest, res: Response) => {
-  const matches = matchService.getMatches(req.userId!);
+router.get('/', async (req: AuthRequest, res: Response) => {
+  const matches = await matchService.getMatches(req.userId!);
   res.json({ code: 0, message: 'success', data: matches });
 });
 
 // DELETE /api/matches/:id
-router.delete('/:id', (req: AuthRequest, res: Response) => {
+router.delete('/:id', async (req: AuthRequest, res: Response) => {
   try {
-    matchService.unmatch(req.userId!, String(req.params.id));
+    await matchService.unmatch(req.userId!, String(req.params.id));
     res.json({ code: 0, message: '已取消匹配' });
   } catch (err: unknown) {
     res.status(400).json({ code: 400, message: err instanceof Error ? err.message : '操作失败' });
@@ -37,9 +37,9 @@ router.delete('/:id', (req: AuthRequest, res: Response) => {
 });
 
 // POST /api/matches/:id/block
-router.post('/:id/block', (req: AuthRequest, res: Response) => {
+router.post('/:id/block', async (req: AuthRequest, res: Response) => {
   try {
-    matchService.blockUser(req.userId!, String(req.params.id));
+    await matchService.blockUser(req.userId!, String(req.params.id));
     res.json({ code: 0, message: '已拉黑' });
   } catch (err: unknown) {
     res.status(400).json({ code: 400, message: err instanceof Error ? err.message : '操作失败' });

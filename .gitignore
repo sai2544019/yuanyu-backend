@@ -7,3 +7,5 @@ dist/
 .DS_Store
 *.tgz
 coverage/
+
+/src/generated/prisma

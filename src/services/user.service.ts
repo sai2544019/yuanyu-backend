@@ -1,287 +1,243 @@
-import { v4 as uuidv4 } from 'uuid';
 import jwt from 'jsonwebtoken';
-import bcrypt from 'bcryptjs';
-import db from '../db';
+import prisma from '../db/prisma';
 import { config } from '../config';
-import type { User, UserPublic, UserQuestion, JwtPayload, Gender, SwipeAction } from '../types';
+import type { UserPublic, Gender, UserQuestion as UQ } from '../types';
+
+function calcDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
 
 export class UserService {
-  // ========== 认证 ==========
-
-  async sendCode(phone: string): Promise<{ code: string }> {
-    const code = String(Math.floor(100000 + Math.random() * 900000));
-    db.verificationCodes.set(phone, {
-      code,
-      expiresAt: Date.now() + 5 * 60 * 1000,
-    });
-    console.log(`📱 验证码 ${code} 已发送到 ${phone} (开发环境)`);
-    return { code };
-  }
-
-  async verifyCode(phone: string, code: string): Promise<{ user: User | null; isNew: boolean; token: string; refreshToken: string }> {
-    const record = db.verificationCodes.get(phone);
-    if (!record || record.code !== code || Date.now() > record.expiresAt) {
-      throw new Error('验证码错误或已过期');
-    }
-    db.verificationCodes.delete(phone);
-
-    let user = Array.from(db.users.values()).find(u => u.phone === phone && !u.isDeleted);
-    const isNew = !user;
-
-    if (!user) {
-      user = {
-        id: `user_${uuidv4().slice(0, 8)}`,
-        phone,
-        nickname: `用户${phone.slice(-4)}`,
-        gender: 0 as Gender,
-        isVerified: false,
-        vipStatus: 0,
-        isOnline: true,
-        lastActiveAt: new Date().toISOString(),
-        isDeleted: false,
-        dailySwipeLimit: 50,
-        dailySwipeUsed: 0,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        photos: [],
-        interests: [],
-      };
-      db.users.set(user.id, user);
-    } else {
-      user.isOnline = true;
-      user.lastActiveAt = new Date().toISOString();
-      user.updatedAt = new Date().toISOString();
-    }
-
-    const token = this.generateToken(user.id, user.phone);
-    const refreshToken = this.generateRefreshToken(user.id);
-
-    return { user, isNew, token, refreshToken };
-  }
-
-  private generateToken(userId: string, phone: string): string {
-    return jwt.sign({ userId, phone } as JwtPayload, config.jwt.secret, {
-      expiresIn: 900,
+  private generateToken(userId: string): string {
+    return jwt.sign({ userId }, config.jwt.secret, {
+      expiresIn: config.jwt.accessExpiresIn,
     });
   }
 
   private generateRefreshToken(userId: string): string {
     return jwt.sign({ userId, type: 'refresh' }, config.jwt.secret, {
-      expiresIn: 2592000,
+      expiresIn: config.jwt.refreshExpiresIn,
     });
   }
 
-  // 一键注册（昵称已存在则登录）
-  async register(nickname: string): Promise<{ user: User & { photos: string[]; interests: string[] }; token: string; refreshToken: string; isNew: boolean }> {
-    // 先查是否已有该昵称的用户，有则直接登录
-    const existing = Array.from(db.users.values()).find(u => u.nickname === nickname && !u.isDeleted);
+  // ========== 认证 ==========
+
+  async register(nickname: string) {
+    const existing = await prisma.user.findFirst({
+      where: { nickname, isDeleted: false },
+    });
     if (existing) {
-      const result = await this.loginByNickname(nickname);
-      return { ...result, isNew: false };
+      return this.loginByNickname(nickname);
     }
 
-    const id = `user_${uuidv4().slice(0, 8)}`;
-    const user: User & { photos: string[]; interests: string[] } = {
-      id,
-      phone: '',
-      nickname,
-      gender: 0 as Gender,
-      isVerified: false,
-      vipStatus: 0,
-      isOnline: true,
-      lastActiveAt: new Date().toISOString(),
-      isDeleted: false,
-      dailySwipeLimit: 50,
-      dailySwipeUsed: 0,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      photos: [],
-      interests: [],
-      avatarUrl: `https://ui-avatars.com/api/?name=${encodeURIComponent(nickname)}&background=FF6B6B&color=fff&size=200`,
-    };
-    db.users.set(id, user);
-    const token = this.generateToken(id, '');
-    const refreshToken = this.generateRefreshToken(id);
+    const user = await prisma.user.create({
+      data: {
+        nickname,
+        avatarUrl: `https://ui-avatars.com/api/?name=${encodeURIComponent(nickname)}&background=FF6B6B&color=fff&size=200`,
+        photos: JSON.stringify([]),
+        interests: JSON.stringify([]),
+      },
+    });
+
+    const token = this.generateToken(user.id);
+    const refreshToken = this.generateRefreshToken(user.id);
     return { user, token, refreshToken, isNew: true };
   }
 
-  // 通过昵称登录（已有用户）
-  async loginByNickname(nickname: string): Promise<{ user: User & { photos: string[]; interests: string[] }; token: string; refreshToken: string }> {
-    const user = Array.from(db.users.values()).find(u => u.nickname === nickname && !u.isDeleted);
-    if (!user) {
-      throw new Error('用户不存在，请先注册');
-    }
-    user.isOnline = true;
-    user.lastActiveAt = new Date().toISOString();
-    user.updatedAt = new Date().toISOString();
-    const token = this.generateToken(user.id, user.phone);
+  async loginByNickname(nickname: string) {
+    const user = await prisma.user.findFirst({
+      where: { nickname, isDeleted: false },
+    });
+    if (!user) throw new Error('用户不存在，请先注册');
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { isOnline: true, lastActiveAt: new Date() },
+    });
+
+    const token = this.generateToken(user.id);
     const refreshToken = this.generateRefreshToken(user.id);
     return { user, token, refreshToken };
   }
 
-  refreshToken(refreshToken: string): { token: string; refreshToken: string } {
-    try {
-      const payload = jwt.verify(refreshToken, config.jwt.secret) as JwtPayload & { type?: string };
-      if (payload.type !== 'refresh') throw new Error('无效的刷新令牌');
-      const user = db.users.get(payload.userId);
-      if (!user || user.isDeleted) throw new Error('用户不存在');
-      return {
-        token: this.generateToken(user.id, user.phone),
-        refreshToken: this.generateRefreshToken(user.id),
-      };
-    } catch {
-      throw new Error('刷新令牌无效');
-    }
+  async refreshToken(refreshToken: string) {
+    const payload = jwt.verify(refreshToken, config.jwt.secret) as { userId: string; type?: string };
+    if (payload.type !== 'refresh') throw new Error('无效的刷新令牌');
+    const user = await prisma.user.findUnique({ where: { id: payload.userId } });
+    if (!user || user.isDeleted) throw new Error('用户不存在');
+    return {
+      token: this.generateToken(user.id),
+      refreshToken: this.generateRefreshToken(user.id),
+    };
   }
 
   // ========== 用户资料 ==========
 
-  getMe(userId: string): User & { photos: string[]; interests: string[] } | null {
-    const user = db.users.get(userId);
-    return user || null;
-  }
-
-  getUserProfile(userId: string, viewerId?: string): UserPublic | null {
-    const user = db.users.get(userId);
+  async getMe(userId: string) {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user || user.isDeleted) return null;
-    return this.toPublicUser(user, viewerId);
+    return {
+      ...user,
+      photos: JSON.parse(user.photos || '[]') as string[],
+      interests: JSON.parse(user.interests || '[]') as string[],
+    };
   }
 
-  updateProfile(userId: string, data: Partial<User>): User & { photos: string[]; interests: string[] } {
-    const user = db.users.get(userId);
+  async getUserProfile(userId: string) {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user || user.isDeleted) return null;
+    return this.toPublicUser(user);
+  }
+
+  async updateProfile(userId: string, data: {
+    nickname?: string; gender?: Gender; birthday?: string;
+    city?: string; district?: string; bio?: string; avatarUrl?: string;
+  }) {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new Error('用户不存在');
 
-    const allowedFields: (keyof User)[] = ['nickname', 'gender', 'birthday', 'city', 'district', 'bio', 'avatarUrl'];
-    allowedFields.forEach(field => {
-      if (data[field] !== undefined) {
-        (user as unknown as Record<string, unknown>)[field] = data[field];
-      }
+    return prisma.user.update({
+      where: { id: userId },
+      data: {
+        ...(data.nickname !== undefined && { nickname: data.nickname }),
+        ...(data.gender !== undefined && { gender: data.gender }),
+        ...(data.birthday !== undefined && { birthday: new Date(data.birthday) }),
+        ...(data.city !== undefined && { city: data.city }),
+        ...(data.district !== undefined && { district: data.district }),
+        ...(data.bio !== undefined && { bio: data.bio }),
+        ...(data.avatarUrl !== undefined && { avatarUrl: data.avatarUrl }),
+      },
     });
-    user.updatedAt = new Date().toISOString();
-    return user;
   }
 
-  updateLocation(userId: string, latitude: number, longitude: number): void {
-    const user = db.users.get(userId);
-    if (!user) throw new Error('用户不存在');
-    user.latitude = latitude;
-    user.longitude = longitude;
-    user.lastActiveAt = new Date().toISOString();
-    user.updatedAt = new Date().toISOString();
+  async updateLocation(userId: string, latitude: number, longitude: number) {
+    await prisma.user.update({
+      where: { id: userId },
+      data: { latitude, longitude, lastActiveAt: new Date() },
+    });
   }
 
-  // ========== 兴趣标签 ==========
-
-  updateInterests(userId: string, interests: string[]): string[] {
-    const user = db.users.get(userId);
-    if (!user) throw new Error('用户不存在');
-    user.interests = interests.slice(0, 15);
-    user.updatedAt = new Date().toISOString();
-    return user.interests;
+  async updateInterests(userId: string, interests: string[]) {
+    const user = await prisma.user.update({
+      where: { id: userId },
+      data: { interests: JSON.stringify(interests.slice(0, 15)) },
+    });
+    return JSON.parse(user.interests || '[]') as string[];
   }
 
   // ========== 真心话 ==========
 
-  getQuestions(userId: string): UserQuestion[] {
-    return Array.from(db.questions.values())
-      .filter(q => q.userId === userId)
-      .sort((a, b) => a.sortOrder - b.sortOrder);
+  async getQuestions(userId: string): Promise<UQ[]> {
+    const qs = await prisma.userQuestion.findMany({
+      where: { userId },
+      orderBy: { sortOrder: 'asc' },
+    });
+    return qs;
   }
 
-  updateQuestion(userId: string, questionId: string, answer: string): UserQuestion {
-    const q = db.questions.get(questionId);
+  async updateQuestion(userId: string, questionId: string, answer: string): Promise<UQ> {
+    const q = await prisma.userQuestion.findUnique({ where: { id: questionId } });
     if (!q || q.userId !== userId) throw new Error('问题不存在');
-    q.answer = answer;
-    return q;
+    return prisma.userQuestion.update({
+      where: { id: questionId },
+      data: { answer },
+    });
   }
 
-  addQuestion(userId: string, question: string, answer: string): UserQuestion {
-    const existing = this.getQuestions(userId);
-    if (existing.length >= 10) throw new Error('最多添加10个问题');
-    const q: UserQuestion = {
-      id: uuidv4(),
-      userId,
-      question,
-      answer,
-      isPublic: true,
-      sortOrder: existing.length,
-    };
-    db.questions.set(q.id, q);
-    return q;
+  async addQuestion(userId: string, question: string, answer: string): Promise<UQ> {
+    const count = await prisma.userQuestion.count({ where: { userId } });
+    if (count >= 10) throw new Error('最多添加10个问题');
+    return prisma.userQuestion.create({
+      data: { userId, question, answer, sortOrder: count },
+    });
   }
 
-  deleteQuestion(userId: string, questionId: string): void {
-    const q = db.questions.get(questionId);
+  async deleteQuestion(userId: string, questionId: string): Promise<void> {
+    const q = await prisma.userQuestion.findUnique({ where: { id: questionId } });
     if (!q || q.userId !== userId) throw new Error('问题不存在');
-    db.questions.delete(questionId);
+    await prisma.userQuestion.delete({ where: { id: questionId } });
   }
 
   // ========== 发现页推荐 ==========
 
-  getDiscoverFeed(userId: string, preferGender: Gender, page = 1, pageSize = 20): UserPublic[] {
-    const me = db.users.get(userId);
-    if (!me) return [];
+  async getDiscoverFeed(userId: string, preferGender: Gender, page = 1, pageSize = 20) {
+    const swipedIds = await prisma.swipeRecord.findMany({
+      where: { swiperId: userId },
+      select: { swipedId: true },
+    });
+    const swipedSet = new Set(swipedIds.map(r => r.swipedId));
 
-    // 排除自己和已滑过的人
-    const swipedIds = new Set(
-      db.swipeRecords
-        .filter(r => r.swiperId === userId)
-        .map(r => r.swipedId)
-    );
-
-    const candidates = Array.from(db.users.values())
-      .filter(u =>
-        u.id !== userId &&
-        !u.isDeleted &&
-        u.gender === preferGender &&
-        !swipedIds.has(u.id) &&
-        u.photos.length > 0
-      )
-      .map(u => this.toPublicUser(u, userId))
-      .filter(u => u !== null) as UserPublic[];
-
-    // 简单排序：在线优先，活跃优先
-    candidates.sort((a, b) => {
-      if (a.isOnline !== b.isOnline) return a.isOnline ? -1 : 1;
-      return 0;
+    const users = await prisma.user.findMany({
+      where: {
+        id: { not: userId },
+        isDeleted: false,
+        gender: preferGender === 3 ? undefined : preferGender,
+        photos: { not: '[]' },
+      },
+      orderBy: { isOnline: 'desc' },
     });
 
-    // 分页
-    const start = (page - 1) * pageSize;
-    return candidates.slice(start, start + pageSize);
+    const photosSet = new Set<string>();
+    for (const u of users) {
+      const p = JSON.parse(u.photos || '[]') as string[];
+      if (p.length > 0) photosSet.add(u.id);
+    }
+
+    const candidates = users
+      .filter(u => !swipedSet.has(u.id) && photosSet.has(u.id))
+      .map(u => this.toPublicUser(u))
+      .slice((page - 1) * pageSize, page * pageSize);
+
+    return candidates;
   }
 
   // ========== 附近的人 ==========
 
-  getNearby(userId: string, category?: string, page = 1, pageSize = 20): UserPublic[] {
-    const me = db.users.get(userId);
-    if (!me || me.latitude === undefined || me.longitude === undefined) return [];
+  async getNearby(userId: string, _category?: string, page = 1, pageSize = 20) {
+    const me = await prisma.user.findUnique({ where: { id: userId } });
+    if (!me || me.latitude === null || me.longitude === null) return [];
 
-    const candidates = Array.from(db.users.values())
-      .filter(u =>
-        u.id !== userId &&
-        !u.isDeleted &&
-        u.latitude !== undefined &&
-        u.longitude !== undefined
-      )
+    const users = await prisma.user.findMany({
+      where: {
+        id: { not: userId },
+        isDeleted: false,
+        latitude: { not: null },
+        longitude: { not: null },
+      },
+    });
+
+    const candidates = users
       .map(u => {
-        const dist = this.calcDistance(me.latitude!, me.longitude!, u.latitude!, u.longitude!);
-        const pub = this.toPublicUser(u, userId);
-        if (pub) pub.distance = dist;
+        const dist = calcDistance(me.latitude!, me.longitude!, u.latitude!, u.longitude!);
+        const pub = this.toPublicUser(u);
+        pub.distance = dist;
         return pub;
       })
-      .filter(u => u !== null && u.distance !== undefined && u.distance <= 50)
-      .sort((a, b) => (a!.distance || 0) - (b!.distance || 0)) as UserPublic[];
+      .filter(u => u.distance !== undefined && u.distance <= 50)
+      .sort((a, b) => (a.distance || 0) - (b.distance || 0))
+      .slice((page - 1) * pageSize, page * pageSize);
 
-    const start = (page - 1) * pageSize;
-    return candidates.slice(start, start + pageSize);
+    return candidates;
   }
 
   // ========== 辅助方法 ==========
 
-  private toPublicUser(user: User & { photos: string[]; interests: string[] }, viewerId?: string): UserPublic | null {
+  private toPublicUser(user: {
+    id: string; nickname: string; gender: Gender; birthday: Date | null;
+    city: string | null; district: string | null; bio: string | null;
+    avatarUrl: string | null; isOnline: boolean; isVerified: boolean;
+    photos: string; interests: string;
+  }): UserPublic {
+    const photos = JSON.parse(user.photos || '[]') as string[];
+    const interests = JSON.parse(user.interests || '[]') as string[];
     const age = user.birthday
-      ? Math.floor((Date.now() - new Date(user.birthday).getTime()) / (365.25 * 24 * 3600 * 1000))
+      ? Math.floor((Date.now() - user.birthday.getTime()) / (365.25 * 24 * 3600 * 1000))
       : undefined;
 
     return {
@@ -289,27 +245,14 @@ export class UserService {
       nickname: user.nickname,
       gender: user.gender,
       age,
-      city: user.city,
-      district: user.district,
-      bio: user.bio,
-      avatarUrl: user.photos[0] || user.avatarUrl,
+      city: user.city || undefined,
+      district: user.district || undefined,
+      bio: user.bio || undefined,
+      avatarUrl: photos[0] || user.avatarUrl || undefined,
       isOnline: user.isOnline,
       isVerified: user.isVerified,
-      interests: user.interests,
-      questions: Array.from(db.questions.values())
-        .filter(q => q.userId === user.id && q.isPublic)
-        .slice(0, 3),
+      interests,
     };
-  }
-
-  private calcDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
-    const R = 6371;
-    const dLat = (lat2 - lat1) * Math.PI / 180;
-    const dLon = (lon2 - lon1) * Math.PI / 180;
-    const a = Math.sin(dLat / 2) ** 2 +
-      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-      Math.sin(dLon / 2) ** 2;
-    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   }
 }
 

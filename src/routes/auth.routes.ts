@@ -1,6 +1,9 @@
 import { Router, Request, Response } from 'express';
 import { userService } from '../services/user.service';
 import { authMiddleware } from '../middleware/auth';
+import prisma from '../db/prisma';
+import jwt from 'jsonwebtoken';
+import { config } from '../config';
 
 const router = Router();
 
@@ -88,6 +91,29 @@ router.post('/refresh', async (req: Request, res: Response) => {
 // POST /api/auth/logout
 router.post('/logout', authMiddleware, async (_req: Request, res: Response) => {
   res.json({ code: 0, message: '已退出登录' });
+});
+
+// POST /api/auth/survey — 提交首次调研问卷
+router.post('/survey', async (req: Request, res: Response) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith('Bearer ')) {
+    return res.status(401).json({ code: 401, message: '未登录' });
+  }
+  let userId: string;
+  try {
+    const payload = jwt.verify(authHeader.slice(7), config.jwt.secret) as { userId: string };
+    userId = payload.userId;
+  } catch {
+    return res.status(401).json({ code: 401, message: '登录已过期' });
+  }
+  const { purposes = [], habits = [] } = req.body;
+  await prisma.user.update({
+    where: { id: userId },
+    data: {
+      interests: JSON.stringify([...new Set([...purposes, ...habits])].slice(0, 15)),
+    },
+  });
+  res.json({ code: 0, message: '调研已保存' });
 });
 
 export default router;

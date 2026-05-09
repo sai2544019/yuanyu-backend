@@ -1,0 +1,303 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ================== User ==================
+
+model User {
+  id              String    @id @default(cuid())
+  phone           String?   @unique @db.VarChar(20)
+  nickname        String    @unique @db.VarChar(50)
+  password        String?   @db.VarChar(255)
+  gender          Int       @default(0) // 0=未设置, 1=男, 2=女, 3=其他
+  birthday        DateTime? @db.Date
+  city            String?   @db.VarChar(50)
+  district        String?   @db.VarChar(50)
+  bio             String?   @db.Text
+  avatarUrl       String?   @db.VarChar(500)
+  photos          String    @db.Text // JSON array
+  interests       String    @db.Text // JSON array
+  latitude        Float?
+  longitude       Float?
+  isVerified      Boolean   @default(false)
+  vipStatus       Int       @default(0)   // 0=免费, 1=月卡, 2=季卡, 3=年卡
+  vipExpireAt     DateTime?
+  isOnline        Boolean   @default(false)
+  lastActiveAt    DateTime  @default(now())
+  isDeleted       Boolean   @default(false)
+  dailySwipeLimit Int       @default(50)
+  dailySwipeUsed  Int       @default(0)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  // Relations
+  swipeRecords        SwipeRecord[]          @relation("UserSwipes")
+  swipedBy            SwipeRecord[]          @relation("UserSwipedBy")
+  matchesAsA          Match[]                @relation("MatchAsA")
+  matchesAsB          Match[]                @relation("MatchAsB")
+  conversationsA      Conversation[]         @relation("ConvUserA")
+  conversationsB      Conversation[]         @relation("ConvUserB")
+  messagesSent        Message[]              @relation("SentMessages")
+  questions           UserQuestion[]
+  communityMembership CommunityMember[]
+  ownedCommunities    Community[]            @relation("CommunityOwner")
+  activitiesCreated   Activity[]
+  blockedUsers        BlockedUser[]           @relation("Blocker")
+  blockedBy           BlockedUser[]           @relation("Blocked")
+  aiConversations     AiConversation[]
+  reminders           Reminder[]
+  userSurvey          UserSurvey?
+}
+
+// ================== Swipe Record ==================
+
+model SwipeRecord {
+  id        String   @id @default(cuid())
+  swiperId  String
+  swipedId  String
+  action    Int      // 1=跳过, 2=喜欢, 3=超级喜欢
+  createdAt DateTime @default(now())
+
+  swiper User @relation("UserSwipes", fields: [swiperId], references: [id], onDelete: Cascade)
+  swiped User @relation("UserSwipedBy", fields: [swipedId], references: [id], onDelete: Cascade)
+
+  @@unique([swiperId, swipedId])
+  @@index([swipedId])
+}
+
+// ================== Match ==================
+
+model Match {
+  id          String    @id @default(cuid())
+  userAId     String
+  userBId     String
+  matchType   Int       @default(1) // 1=普通喜欢, 2=超级喜欢
+  createdAt   DateTime  @default(now())
+  unmatchedAt DateTime?
+
+  userA User @relation("MatchAsA", fields: [userAId], references: [id], onDelete: Cascade)
+  userB User @relation("MatchAsB", fields: [userBId], references: [id], onDelete: Cascade)
+
+  @@unique([userAId, userBId])
+}
+
+// ================== Conversation ==================
+
+model Conversation {
+  id            String    @id @default(cuid())
+  type          Int       @default(1) // 1=私聊, 2=群聊
+  userAId       String?   // 私聊场景：一方
+  userBId       String?   // 私聊场景：另一方
+  communityId   String?
+  lastMessageId String?   @db.VarChar(50)
+  lastMessageAt DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  userA       User?      @relation("ConvUserA", fields: [userAId], references: [id], onDelete: SetNull)
+  userB       User?      @relation("ConvUserB", fields: [userBId], references: [id], onDelete: SetNull)
+  community   Community? @relation(fields: [communityId], references: [id], onDelete: Cascade)
+  messages    Message[]
+
+  @@index([userAId])
+  @@index([userBId])
+  @@index([communityId])
+  @@index([lastMessageAt(sort: Desc)])
+}
+
+// ================== Message ==================
+
+model Message {
+  id          String    @id @default(cuid())
+  convId      String
+  senderId    String
+  type        Int       @default(1) // 1=text, 2=image, 3=voice, 4=location, 5=system
+  content     String?   @db.Text
+  mediaUrl    String?   @db.VarChar(500)
+  duration    Int?
+  latitude    Float?
+  longitude   Float?
+  isRecalled  Boolean   @default(false)
+  readAt      DateTime?
+  recalledAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  conversation Conversation @relation(fields: [convId], references: [id], onDelete: Cascade)
+  sender       User        @relation("SentMessages", fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@index([convId, createdAt(sort: Desc)])
+  @@index([senderId])
+}
+
+// ================== Community ==================
+
+model Community {
+  id          String    @id @default(cuid())
+  name        String    @db.VarChar(100)
+  description String?   @db.Text
+  coverUrl    String?   @db.VarChar(500)
+  category    String    @db.VarChar(50)
+  city        String?   @db.VarChar(50)
+  type        Int       @default(1) // 1=公开, 2=审核, 3=私密
+  ownerId     String
+  memberCount Int       @default(0)
+  maxMembers  Int       @default(500)
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+
+  owner       User               @relation("CommunityOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  members     CommunityMember[]
+  activities  Activity[]
+  conversations Conversation[]
+
+  @@index([category])
+  @@index([city])
+  @@index([memberCount(sort: Desc)])
+}
+
+// ================== Community Member ==================
+
+model CommunityMember {
+  id           String   @id @default(cuid())
+  communityId  String
+  userId       String
+  role         Int      @default(0) // 0=成员, 1=管理员, 2=群主
+  status       Int      @default(1) // 1=正常, 2=待审核, 3=已退出
+  joinedAt     DateTime @default(now())
+
+  community Community @relation(fields: [communityId], references: [id], onDelete: Cascade)
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([communityId, userId])
+  @@index([userId])
+}
+
+// ================== Activity ==================
+
+model Activity {
+  id              String    @id @default(cuid())
+  communityId     String
+  creatorId       String
+  title           String    @db.VarChar(200)
+  description     String?   @db.Text
+  coverUrl        String?   @db.VarChar(500)
+  location        String    @db.VarChar(200)
+  latitude        Float?
+  longitude       Float?
+  startTime       DateTime
+  endTime         DateTime
+  feeType         Int       @default(0) // 0=免费, 1=AA, 2=付费
+  feeAmount       Float?
+  maxAttendees    Int       @default(0)
+  curAttendees    Int       @default(0)
+  signupDeadline  DateTime?
+  status          Int       @default(0) // 0=报名中, 1=进行中, 2=已结束, 3=已取消
+  createdAt       DateTime  @default(now())
+
+  community Community @relation(fields: [communityId], references: [id], onDelete: Cascade)
+  creator   User      @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+
+  @@index([communityId])
+  @@index([status])
+  @@index([startTime(sort: Desc)])
+}
+
+// ================== User Question (真心话) ==================
+
+model UserQuestion {
+  id        String  @id @default(cuid())
+  userId    String
+  question  String  @db.VarChar(500)
+  answer    String  @db.Text
+  isPublic  Boolean @default(true)
+  sortOrder Int     @default(0)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ================== AI Conversation ==================
+
+model AiConversation {
+  id        String   @id @default(cuid())
+  userId    String
+  settings  String?  @db.Text // JSON
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user     User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages AiMessage[]
+
+  @@index([userId])
+}
+
+model AiMessage {
+  id        String   @id @default(cuid())
+  convId    String
+  role      String   @db.VarChar(20) // "user" | "assistant"
+  content   String   @db.Text
+  createdAt DateTime @default(now())
+
+  conv AiConversation @relation(fields: [convId], references: [id], onDelete: Cascade)
+
+  @@index([convId, createdAt])
+}
+
+// ================== Reminder ==================
+
+model Reminder {
+  id        String   @id @default(cuid())
+  userId    String
+  type      String   @db.VarChar(20) // "meal" | "water" | "sleep" | "custom"
+  content   String   @db.VarChar(200)
+  time      String   @db.VarChar(10) // "HH:mm"
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ================== User Survey ==================
+
+model UserSurvey {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  purposes  String   @db.Text // JSON array
+  habits    String?  @db.Text // JSON array
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ================== Verification Code (手机验证码) ==================
+
+model VerificationCode {
+  phone     String   @id @db.VarChar(20)
+  code     String   @db.VarChar(10)
+  expiresAt DateTime
+
+  @@index([expiresAt])
+}
+
+// ================== Blocked User ==================
+
+model BlockedUser {
+  id           String   @id @default(cuid())
+  blockerId    String
+  blockedId    String
+  createdAt    DateTime @default(now())
+
+  blocker User @relation("Blocker", fields: [blockerId], references: [id], onDelete: Cascade)
+  blocked User @relation("Blocked", fields: [blockedId], references: [id], onDelete: Cascade)
+
+  @@unique([blockerId, blockedId])
+}
